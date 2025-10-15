@@ -41,9 +41,65 @@ This repository contains two ABAP reports that help teams monitor BW process cha
 
 ## How to use
 - Import the source into your ABAP system (SE38).
+
+
+
+"===============================================================
+" Z_ALERT_CFG  — Monitor configuration for process chains
+"---------------------------------------------------------------
+" Purpose
+"   Stores config per Process Chain: alert window, frequency,
+"   and contact list (multiple emails allowed, separated by ';').
+"
+" Primary Key
+"   CLIENT (MANDT), PROCESS_CHAIN_ID
+"
+" Fields
+"   MANDT               CLNT(3)     " Client
+"   PROCESS_CHAIN_ID    CHAR(25)    " Process Chain
+"   FREQUENCY           CHAR(10)    " e.g. 'DAILY', 'HOURLY', 'WEEKLY'
+"   START_TIME          TIMS(6)     " Optional: start time (HHMMSS)
+"   AVAILABILITY_TIME   TIMS(6)     " Expected ready time (HHMMSS)
+"   EMAIL_CONTACT       CHAR(254)   " One or many emails; use ';' as separator
+"   IS_CRITICAL         CHAR(1)     " Boolean-like: 'X' = critical, ' ' = non-critical
+"
+" Notes
+" - EMAIL_CONTACT accepts ';', ',' and line-breaks (program normalizes to ';')
+" - IS_CRITICAL can be used to escalate or route differently
+"===============================================================
+
 - Ensure `Z_ALERT_CFG` and `Z_ALERT_LOG` exist with the expected fields.
 - Configure SAPconnect (SOST) for outbound email.
 - Run `ZPC_MONITOR_ALERT` to queue emails; run `ZPC_DELAY_JUSTIFY` to maintain justifications.
 
-## License
-MIT (or your preferred open-source license)
+
+
+"===============================================================
+" Z_ALERT_LOG  — Audit/justification log per process-chain run
+"---------------------------------------------------------------
+" Purpose
+"   Stores one audit record per chain/log execution, including
+"   timestamps, status, recipient(s) and the justification text.
+"
+" Primary Key
+"   ID_EVENT (timestamp-based unique ID)
+"
+" Technical Keys (business key for updates)
+"   CHAIN_ID + LOG_ID
+"
+" Fields
+"   ID_EVENT            DEC(15)     " UTC short TS (YYYYMMDDhhmmss)
+"   CHAIN_ID            CHAR(25)    " Process Chain
+"   LOG_ID              CHAR(25)    " Run Log ID
+"   RUN_DATE            DATS(8)     " Execution date (YYYYMMDD)
+"   STARTTIMESTAMP      DEC(21,7)   " UTC long TS start (YYYYMMDDhhmmss,mmmmuuu)
+"   UPDATEDTIMESTAMP    DEC(21,7)   " UTC long TS last update
+"   STATUS              CHAR(1)     " R/X/S/J/G/F/A/Y (RSPC status)
+"   AVAILABILITY_TIME   TIMS(6)     " Expected time (HHMMSS)
+"   RESPONSIBLE         CHAR(254)   " Email (normalized single address per row)
+"   COMMENT_FAIL        CHAR(300)   " Free text justification for delay/failure
+"
+" Notes
+" - Application updates COMMENT_FAIL by CHAIN_ID + LOG_ID
+" - ID_EVENT is generated from current timestamp when logging an event
+"===============================================================

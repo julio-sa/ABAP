@@ -1,0 +1,177 @@
+*---------------------------------------------------------------------*
+* Report  ZPC_DELAY_JUSTIFY
+*---------------------------------------------------------------------*
+* Program     : ZPC_DELAY_JUSTIFY
+* Author      : Julio Assis
+* Description : Edit justification (comment) in Z_ALERT_LOG
+*---------------------------------------------------------------------*
+REPORT zpc_delay_justify.
+
+TABLES: z_alert_log.
+
+TYPE-POOLS: slis.
+DATA: gt_fieldcat TYPE slis_t_fieldcat_alv,
+      gt_log      TYPE TABLE OF z_alert_log.
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+  SELECT-OPTIONS: s_date FOR z_alert_log-run_date.
+  PARAMETERS:     p_chain  TYPE rspclogchain-chain_id,
+                  p_log    TYPE rspclogchain-log_id,
+                  p_resp   TYPE z_alert_log-responsible,
+                  p_status TYPE rspclogchain-analyzed_status.
+SELECTION-SCREEN END OF BLOCK b1.
+
+START-OF-SELECTION.
+  CALL FUNCTION 'AUTHORITY_CHECK_TCODE'
+    EXPORTING tcode = 'RSA1'
+    EXCEPTIONS ok = 1 not_ok = 2 OTHERS = 3.
+  IF sy-subrc <> 1.
+    WRITE 'No authorization for this program.'.
+    EXIT.
+  ENDIF.
+
+  PERFORM get_data.
+
+  IF gt_log IS INITIAL.
+    MESSAGE 'No records found with the informed criteria.' TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+
+  PERFORM display_alv.
+
+FORM get_data.
+  DATA lt_where TYPE TABLE OF string.
+
+  IF s_date[] IS NOT INITIAL. APPEND 'run_date IN @s_date'       TO lt_where. ENDIF.
+  IF p_chain  IS NOT INITIAL. APPEND 'chain_id = @p_chain'        TO lt_where. ENDIF.
+  IF p_log    IS NOT INITIAL. APPEND 'log_id   = @p_log'          TO lt_where. ENDIF.
+  IF p_resp   IS NOT INITIAL. APPEND 'responsible = @p_resp'      TO lt_where. ENDIF.
+  IF p_status IS NOT INITIAL. APPEND 'status = @p_status'         TO lt_where. ENDIF.
+
+  IF lt_where IS INITIAL.
+    MESSAGE 'Provide at least one selection parameter.' TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  CONCATENATE LINES OF lt_where INTO DATA(lv_where) SEPARATED BY ' AND '.
+
+  SELECT * FROM z_alert_log INTO TABLE @gt_log WHERE (lv_where).
+ENDFORM.
+
+FORM display_alv.
+  DATA ls_layout TYPE slis_layout_alv.
+
+  PERFORM build_field_catalog_manual.
+
+  ls_layout-colwidth_optimize = abap_true.
+  ls_layout-zebra             = abap_true.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program       = sy-repid
+      i_callback_user_command  = 'HANDLE_USER_COMMAND'
+      it_fieldcat              = gt_fieldcat
+      is_layout                = ls_layout
+      i_save                   = 'A'
+    TABLES
+      t_outtab                 = gt_log
+    EXCEPTIONS
+      program_error            = 1
+      OTHERS                   = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+ENDFORM.
+
+FORM build_field_catalog_manual.
+  DATA ls_fieldcat TYPE slis_fieldcat_alv.
+  DATA lv_col_pos  TYPE i.
+
+  CLEAR gt_fieldcat.
+
+  DEFINE add_column.
+    lv_col_pos = lv_col_pos + 1.
+    CLEAR ls_fieldcat.
+    ls_fieldcat-col_pos      = lv_col_pos.
+    ls_fieldcat-fieldname    = &1.
+    ls_fieldcat-seltext_m    = &2.
+    ls_fieldcat-seltext_l    = &2.
+    ls_fieldcat-reptext_ddic = &2.
+    APPEND ls_fieldcat TO gt_fieldcat.
+  END-OF-DEFINITION.
+
+  add_column 'CHAIN_ID'     'Process Chain ID'.
+  add_column 'LOG_ID'       'Log ID'.
+  add_column 'RUN_DATE'     'Execution Date'.
+  add_column 'RESPONSIBLE'  'Responsible'.
+  add_column 'STATUS'       'Status'.
+  add_column 'COMMENT_FAIL' 'Failure Justification'.
+
+  LOOP AT gt_fieldcat ASSIGNING FIELD-SYMBOL(<fc>).
+    IF <fc>-fieldname = 'COMMENT_FAIL'.
+      <fc>-hotspot = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+FORM set_pf_status USING rt_extab TYPE slis_t_extab.
+  SET PF-STATUS 'STANDARD_ALV'.
+ENDFORM.
+
+FORM handle_user_command USING r_ucomm LIKE sy-ucomm
+                               rs_selfield TYPE slis_selfield.
+  CASE r_ucomm.
+    WHEN '&IC1'.
+      IF rs_selfield-tabindex > 0 AND
+         ( rs_selfield-fieldname = 'COMMENT_FAIL' OR rs_selfield-fieldname IS INITIAL ).
+        PERFORM edit_comment USING rs_selfield-tabindex.
+        rs_selfield-refresh = abap_true.
+      ENDIF.
+    WHEN '&BACK' OR '&EXIT' OR '&CANCEL'.
+      LEAVE PROGRAM.
+  ENDCASE.
+ENDFORM.
+
+FORM edit_comment USING iv_row TYPE i.
+  READ TABLE gt_log ASSIGNING FIELD-SYMBOL(<fs>) INDEX iv_row.
+  IF sy-subrc <> 0. RETURN. ENDIF.
+
+  DATA: lt_fields      TYPE TABLE OF sval,
+        ls_field       TYPE sval,
+        lv_new_comment TYPE z_alert_log-comment_fail,
+        lv_return      TYPE c.
+
+  ls_field-tabname   = 'Z_ALERT_LOG'.
+  ls_field-fieldname = 'COMMENT_FAIL'.
+  ls_field-value     = <fs>-comment_fail.
+  APPEND ls_field TO lt_fields.
+
+  CALL FUNCTION 'POPUP_GET_VALUES'
+    EXPORTING popup_title = 'Justify Delay / Failure'
+    IMPORTING returncode  = lv_return
+    TABLES    fields      = lt_fields
+    EXCEPTIONS error_in_fields = 1 OTHERS = 2.
+
+  IF sy-subrc = 0 AND lv_return = abap_false.
+    READ TABLE lt_fields INTO ls_field INDEX 1.
+    lv_new_comment = ls_field-value.
+
+    <fs>-comment_fail = lv_new_comment.
+    PERFORM update_record USING <fs>.
+  ENDIF.
+ENDFORM.
+
+FORM update_record USING is_record TYPE z_alert_log.
+  UPDATE z_alert_log
+     SET comment_fail = @is_record-comment_fail
+   WHERE chain_id     = @is_record-chain_id
+     AND log_id       = @is_record-log_id.
+
+  IF sy-subrc = 0.
+    MESSAGE 'Record updated successfully!' TYPE 'S'.
+  ELSE.
+    MESSAGE 'Error while updating the record.' TYPE 'E'.
+  ENDIF.
+ENDFORM.

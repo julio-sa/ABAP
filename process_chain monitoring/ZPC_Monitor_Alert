@@ -1,0 +1,260 @@
+*---------------------------------------------------------------------*
+* Report  ZPC_MONITOR_ALERT
+*---------------------------------------------------------------------*
+* Program     : ZPC_MONITOR_ALERT
+* Author      : Julio Assis
+* Description : Notify responsible contacts about process-chain issues
+*---------------------------------------------------------------------*
+REPORT zpc_monitor_alert.
+
+TABLES: z_alert_cfg,
+        z_alert_log.
+
+TYPES: BEGIN OF ty_pc_monitor,
+         chain_id    TYPE rspclogchain-chain_id,
+         log_id      TYPE rspclogchain-log_id,
+         status      TYPE rspclogchain-analyzed_status,
+         startmstp   TYPE rspcprocesslog-starttimestamp,
+         endtmstp    TYPE rspcprocesslog-endtimestamp,
+         start_time  TYPE syuzeit,
+         end_time    TYPE syuzeit,
+         avlb_time   TYPE z_alert_cfg-availability_time,
+         frequency   TYPE z_alert_cfg-frequency,
+         email       TYPE z_alert_cfg-email_contact,
+         critical    TYPE z_alert_cfg-is_critical,
+       END   OF ty_pc_monitor.
+
+DATA: lt_event          TYPE TABLE OF z_alert_log,
+      ls_event          TYPE z_alert_log,
+      lt_mail_receivers TYPE TABLE OF somlreci1,
+      ls_mail_receivers TYPE somlreci1,
+      it_email_body     TYPE TABLE OF solisti1,
+      is_email_body     TYPE solisti1,
+      sent_status(1)    TYPE c,
+      ls_mail_subject   TYPE sodocchgi1,
+      lt_pc_monitor     TYPE TABLE OF ty_pc_monitor,
+      lv_timestamp      TYPE tzntstmps,
+      lv_time           TYPE t,
+      lv_date           TYPE d.
+
+START-OF-SELECTION.
+  " Optional: authorization gate (keep or remove as you prefer)
+  CALL FUNCTION 'AUTHORITY_CHECK_TCODE'
+    EXPORTING tcode = 'RSA1'
+    EXCEPTIONS ok = 1 not_ok = 2 OTHERS = 3.
+  IF sy-subrc <> 1.
+    WRITE 'No authorization for this program.'.
+    EXIT.
+  ENDIF.
+
+  PERFORM process_chain_monitor.
+
+FORM process_chain_monitor.
+  PERFORM read_table.
+
+  GET TIME STAMP FIELD lv_timestamp.
+  CONVERT TIME STAMP lv_timestamp TIME ZONE 'UTC' INTO DATE lv_date TIME lv_time.
+
+  LOOP AT lt_pc_monitor ASSIGNING FIELD-SYMBOL(<row>).
+    CLEAR ls_mail_receivers.
+
+    " Decide if this row should notify
+    ls_mail_receivers-receiver = COND #( WHEN <row>-status   = 'R'
+                                         OR   <row>-status   = 'X'
+                                         OR   <row>-status   = 'S'
+                                         OR   <row>-status   = 'J'
+                                         OR  ( <row>-status  = 'A' AND lv_time > <row>-avlb_time )
+                                         OR  ( <row>-status  = 'Y' AND lv_time > <row>-avlb_time )
+                                         OR  ( <row>-status  = 'G' AND <row>-end_time > <row>-avlb_time )
+                                         OR  ( <row>-status  = 'F' AND <row>-end_time > <row>-avlb_time )
+                                         THEN <row>-email ELSE space ).
+    ls_mail_receivers-rec_type   = 'U'.
+    ls_mail_receivers-com_type   = 'INT'.
+    ls_mail_receivers-notif_del  = 'X'.
+    ls_mail_receivers-notif_ndel = 'X'.
+
+    IF ls_mail_receivers-receiver IS NOT INITIAL.
+      ls_event-id_event          = lv_timestamp.
+      ls_event-chain_id          = <row>-chain_id.
+      ls_event-log_id            = <row>-log_id.
+      ls_event-run_date          = sy-datum.
+      ls_event-starttimestamp    = <row>-startmstp.
+      ls_event-updatedtimestamp  = lv_timestamp.
+      ls_event-status            = <row>-status.
+      ls_event-availability_time = <row>-avlb_time.
+      ls_event-responsible       = ls_mail_receivers-receiver.
+
+      IF lt_event IS NOT INITIAL.
+        READ TABLE lt_event TRANSPORTING NO FIELDS
+             WITH KEY starttimestamp = ls_event-starttimestamp
+                      chain_id       = ls_event-chain_id
+                      log_id         = ls_event-log_id.
+        IF sy-subrc = 0.
+          APPEND ls_mail_receivers TO lt_mail_receivers.
+        ELSE.
+          INSERT z_alert_log FROM ls_event.
+          APPEND ls_mail_receivers TO lt_mail_receivers.
+        ENDIF.
+      ELSE.
+        INSERT z_alert_log FROM ls_event.
+        APPEND ls_mail_receivers TO lt_mail_receivers.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  IF lt_mail_receivers IS NOT INITIAL.
+    PERFORM build_mail.
+    IF sy-subrc = 0.
+      WRITE: |E-mail successfully queued. Check SOST|.
+    ELSE.
+      WRITE: |Errors occurred while monitoring|.
+    ENDIF.
+  ELSE.
+    WRITE: |Execution complete. No recipients to contact.|.
+  ENDIF.
+ENDFORM.
+
+FORM read_table.
+  SELECT rspclogchain~chain_id                AS chain_id,
+         rspclogchain~log_id                  AS log_id,
+         rspclogchain~analyzed_status         AS status,
+         MIN( rspcprocesslog~starttimestamp ) AS startmstp,
+         MAX( rspcprocesslog~endtimestamp )   AS endtmstp,
+         rspclogchain~zeit                    AS start_time,
+         z_alert_cfg~availability_time        AS avlb_time,
+         z_alert_cfg~frequency                AS frequency,
+         z_alert_cfg~email_contact            AS email,
+         z_alert_cfg~is_critical              AS critical
+    INTO CORRESPONDING FIELDS OF TABLE @lt_pc_monitor
+    FROM z_alert_cfg
+    INNER JOIN rspclogchain    ON z_alert_cfg~process_chain_id = rspclogchain~chain_id
+    INNER JOIN rspcprocesslog  ON rspclogchain~log_id          = rspcprocesslog~log_id
+    WHERE rspclogchain~datum   =  @sy-datum
+    GROUP BY rspclogchain~chain_id,
+             rspclogchain~log_id,
+             rspclogchain~analyzed_status,
+             rspclogchain~zeit,
+             z_alert_cfg~availability_time,
+             z_alert_cfg~frequency,
+             z_alert_cfg~email_contact,
+             z_alert_cfg~is_critical.
+
+  IF sy-subrc <> 0.
+    WRITE: 'No entries found.'.
+  ELSE.
+    WRITE: 'Internal table filled.'.
+  ENDIF.
+
+  SELECT * FROM z_alert_log INTO TABLE @lt_event.
+ENDFORM.
+
+FORM format_dates.
+  LOOP AT lt_pc_monitor ASSIGNING FIELD-SYMBOL(<fmt>).
+    IF <fmt>-status  = 'R'
+    OR <fmt>-status  = 'X'
+    OR <fmt>-status  = 'S'
+    OR <fmt>-status  = 'J'.
+      <fmt>-endtmstp = space.
+    ELSE.
+      CONVERT TIME STAMP <fmt>-endtmstp TIME ZONE 'UTC' INTO DATE lv_date TIME lv_time.
+      <fmt>-end_time = lv_time.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+FORM build_mail.
+  DATA status_description TYPE string.
+
+  CLEAR: it_email_body, ls_mail_subject.
+  ls_mail_subject-obj_langu = sy-langu.
+
+  LOOP AT lt_pc_monitor ASSIGNING FIELD-SYMBOL(<bm>).
+    ls_mail_subject-obj_descr =
+      |Process chain { <bm>-chain_id } failed to deliver data at { <bm>-avlb_time }|.
+
+    CASE <bm>-status.
+      WHEN 'R'. status_description = '(Error)'.
+      WHEN 'X'. status_description = '(Aborted)'.
+      WHEN 'S'. status_description = '(Skipped)'.
+      WHEN 'J'. status_description = '(Job error)'.
+      WHEN 'G'. status_description = '(Ok)'.
+      WHEN 'F'. status_description = '(Done)'.
+      WHEN 'A'. status_description = '(Active)'.
+      WHEN OTHERS. CLEAR status_description.
+    ENDCASE.
+
+    is_email_body-line =
+      |Process chain { <bm>-chain_id } contains status { <bm>-status } { status_description }.|;
+    APPEND is_email_body TO it_email_body.
+  ENDLOOP.
+
+  " Expand recipients (semicolon/comma/newline)
+  DATA: lt_mail_receivers_exp TYPE TABLE OF somlreci1 WITH EMPTY KEY,
+        ls_rec                TYPE somlreci1,
+        lt_tokens             TYPE TABLE OF string WITH EMPTY KEY,
+        lv_raw                TYPE string.
+
+  LOOP AT lt_mail_receivers ASSIGNING FIELD-SYMBOL(<rec>).
+    lv_raw = <rec>-receiver.
+    REPLACE ALL OCCURRENCES OF ','  IN lv_raw WITH ';'.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf IN lv_raw WITH ';'.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_raw WITH ';'.
+
+    CLEAR lt_tokens.
+    SPLIT lv_raw AT ';' INTO TABLE lt_tokens.
+
+    LOOP AT lt_tokens INTO DATA(lv_addr).
+      SHIFT lv_addr LEFT  DELETING LEADING space.
+      SHIFT lv_addr RIGHT DELETING TRAILING space.
+      IF lv_addr IS INITIAL. CONTINUE. ENDIF.
+
+      CLEAR ls_rec.
+      ls_rec = <rec>.            " keep CC/BCC/EXPRESS/REC_TYPE if any
+      ls_rec-receiver = lv_addr.
+      IF ls_rec-rec_type IS INITIAL.
+        ls_rec-rec_type = 'U'.
+      ENDIF.
+
+      APPEND ls_rec TO lt_mail_receivers_exp.
+    ENDLOOP.
+  ENDLOOP.
+
+  SORT lt_mail_receivers_exp BY receiver rec_type copy blind_copy express.
+  DELETE ADJACENT DUPLICATES FROM lt_mail_receivers_exp
+    COMPARING receiver rec_type copy blind_copy express.
+
+  lt_mail_receivers = lt_mail_receivers_exp.
+
+  IF it_email_body IS INITIAL OR lt_mail_receivers IS INITIAL.
+    sy-subrc = 4.
+    RETURN.
+  ENDIF.
+
+  PERFORM send_mail.
+  sy-subrc = 0.
+ENDFORM.
+
+FORM send_mail.
+  CALL FUNCTION 'SO_NEW_DOCUMENT_SEND_API1'
+    EXPORTING
+      document_data = ls_mail_subject
+      document_type = 'RAW'
+      put_in_outbox = 'X'
+      commit_work   = 'X'
+    IMPORTING
+      sent_to_all   = sent_status
+    TABLES
+      object_content = it_email_body
+      receivers      = lt_mail_receivers
+    EXCEPTIONS
+      document_not_sent = 2
+      OTHERS            = 8.
+
+  IF sy-subrc = 0.
+    WRITE: |E-mail sent to queue (SOST).|.
+  ELSEIF sy-subrc = 2.
+    WRITE: |Document not sent to all recipients.|.
+  ELSE.
+    WRITE: |Unexpected send error. Check SOST.|.
+  ENDIF.
+ENDFORM.
